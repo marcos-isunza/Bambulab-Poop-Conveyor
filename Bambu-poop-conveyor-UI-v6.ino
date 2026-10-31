@@ -815,15 +815,14 @@ void handleConfig() {
         html += "<label for='mqtt_password'>Bambu Printer Access Code:</label>";
         html += "<select id='mqtt_password_select' onchange=\"document.getElementById('mqtt_password').value=this.value\">";
         html += "  <option value=''>-- Select code --</option>";
-        html += "  <option value='2fcc0064'>2fcc0064</option>";
-        html += "  <option value='2a5c1918'>2a5c1918</option>";
+        html += "  <option value='XXX'>XXXX</option>";
+        html += "  <option value='XXX'>XXXX</option>";
         html += "</select><br>";
         html += "<input type='text' id='mqtt_password' name='mqtt_password' value='" + String(mqtt_password) + "'><br>";
         html += "<label for='serial_number'>Bambu Printer Serial Number:</label>";
         html += "<select id='serial_number_select' onchange=\"document.getElementById('serial_number').value=this.value\">";
         html += "  <option value=''>-- Select serial --</option>";
-        html += "  <option value='00M09D563001230'>00M09D563001230</option>";
-        html += "  <option value='03919C442502683'>03919C442502683</option>";
+        html += "  <option value='XXX'>XXXX</option>";
         html += "</select><br>";
         html += "<input type='text' id='serial_number' name='serial_number' value='" + String(serial_number) + "'><br>";
         html += "<label for=\"motorRunTime\">Motor Run Time (ms):</label><input type=\"number\" id=\"motorRunTime\" name=\"motorRunTime\" value=\"" + String(motorRunTime) + "\"><br>";
