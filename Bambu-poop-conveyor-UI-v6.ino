@@ -7,7 +7,7 @@
  * --------
  * Firmware for an ESP32 that runs a two-motor conveyor to carry away purge waste
  * ("poop") from a Bambu Lab 3D printer. The conveyor starts when the printer purges
- * (detected over MQTT), when a motion sensor fires, when a physical button is pressed,
+ * (detected over MQTT), when a physical button is pressed,
  * or when a web/Home Assistant call hits the /run endpoint. A 128x32 OLED, three status
  * LEDs and a built-in web UI show and control what is happening.
  *
@@ -37,7 +37,6 @@
  *   Board      ESP32 (uses ledcAttachChannel, so Arduino-ESP32 core 3.x is required)
  *   Motor driver  L298N dual H-bridge driving two DC motors
  *   Display    SSD1306 OLED, 128x32, I2C address 0x3C
- *   Sensor     Digital motion sensor (optional, HIGH = motion)
  *   Inputs     Two momentary push buttons to GND (internal pull-ups are used)
  *
  *   Signal                    GPIO   Notes
@@ -47,7 +46,7 @@
  *   Green LED                 19     Ready / WiFi connected
  *   Yellow LED                18     Waiting / setup / MQTT problem
  *   Red LED                   4      Motor running / MQTT connect failed
- *   Motion sensor             22     Only used when "Use motion sensor" is on
+ *   (GPIO 22 was used by the removed motion sensor and is now free)
  *   Manual trigger button     12     INPUT_PULLUP, LOW = pressed
  *   Reset (AP mode) button    2      INPUT_PULLUP, LOW = pressed, hold 3 s
  *   Motor 1 IN1 / IN2         23 / 21  L298N IN1 / IN2
@@ -90,7 +89,7 @@
  *          - Bambu printer serial number
  *          - Printer model (X1, P1 or A1)
  *          - Motor timing, speed and direction
- *          - Optional: motion sensor mode, debug mode
+ *          - Optional: debug mode
  *     3. Press "Save settings and reboot". The ESP32 stores the values and restarts.
  *
  *   To get back into AP mode later, hold the reset button (GPIO 2) for 3 seconds.
@@ -103,7 +102,7 @@
  *   Any trigger starts the motor sequence, but only if the system is idle (not
  *   waiting, not running, not in the post-run delay).
  *
- *   a) Printer event over MQTT (default mode, motion sensor off)
+ *   a) Printer event over MQTT
  *        Fires when ANY of these is true:
  *          - stg_cur == 4   (changing filament)
  *          - stg_cur == 14  (cleaning nozzle tip)
@@ -111,21 +110,17 @@
  *        For the sub-stage case an extra 75 s is added to the wait time so the purge
  *        lands on the conveyor before it starts (additionalWaitTime).
  *
- *   b) Motion sensor (setting "Use motion sensor")
- *        When enabled, MQTT-based detection is disabled and a HIGH on GPIO 22 starts
- *        the sequence. The auto "pushall" polling is also disabled.
- *
- *   c) Manual trigger button (GPIO 12)
+ *   b) Manual trigger button (GPIO 12)
  *        Debounced (50 ms). Skips the wait time and starts the motors immediately.
  *        Manual runs also skip the post-run delay.
  *
- *   d) Web/Home Assistant: GET /run, or the "Activate motor" button on /control.
+ *   c) Web/Home Assistant: GET /run, or the "Activate motor" button on /control.
  *
  *
  * 5. Motor sequence (state machine)
  * ---------------------------------
  *   Idle
- *     |  trigger (MQTT / motion / web)
+ *     |  trigger (MQTT / web)
  *     v
  *   Waiting        motorWaiting    for motorWaitTime + additionalWaitTime (ms)
  *     |
@@ -162,7 +157,6 @@
  *   MQTT                 "MQTT Connected to Bambu printer" (shown 5 s on boot/reconnect)
  *                        or a connection failure
  *   Event detected       "Printer event detected / Waiting..." (MQTT trigger)
- *                        "Motion sensor event detected / Waiting..." (motion trigger)
  *                        "Motor / Manual trigger" (/run endpoint)
  *   Motor running        Conveyor icon, "Running!", big seconds countdown, progress bar
  *   Motor stopped        "Motor stopped / DONE" with check icon
@@ -171,9 +165,14 @@
  *                          Page 1: state + percent, time remaining, progress bar
  *                          Page 2: job name (21 chars max) and layer count
  *                        Page 2 only appears while a job is printing/paused/preparing.
+ *                        When the printer is idle/finished/failed, the screen rotates
+ *                        (every 4 s) through: printer state + nozzle/bed temps; MQTT
+ *                        connected + model + printer IP; WiFi SSID, IP and signal;
+ *                        conveyor version, runs since boot and time since the last run;
+ *                        date and time (only once NTP has synced). After 2 min of
+ *                        continuous idle the OLED is dimmed to reduce burn-in; it returns
+ *                        to full brightness on any event or print.
  *                        "Waiting for data" shows until the first printer report.
- *                        Not used in motion sensor mode.
- *   Idle (motion mode)   "Using Motion Sensor Mode", refreshed every 5 s
  *   Reset hold           "Reset to AP:" with countdown and progress bar
  *
  *   The display is flashed (inverted for 120 ms) when the motor starts.
@@ -215,12 +214,13 @@
  *   Publish     device/<serial>/request  {"pushing":{"sequence_id":N,"command":"pushall"},
  *                                         "user_id":"2222222"}
  *   Pushall     Sent once on connect and then every 30 s for X1 or every 5 min for
- *               P1/A1 (not sent in motion sensor mode). Can be overridden on the
+ *               P1/A1. Can be overridden on the
  *               config page ("Printer status request interval", 5–3600 s, 0 = auto). It asks the printer for a full
  *               status report.
  *   Parsed      print.stg_cur (stage) and print.mc_print_sub_stage (sub stage) for
  *               triggers; print.gcode_state, mc_percent, mc_remaining_time, layer_num,
- *               total_layer_num and subtask_name for the OLED info screens. Reports
+ *               total_layer_num, subtask_name, nozzle_temper and bed_temper for the OLED
+ *               info screens. Reports
  *               can be partial, so only fields that are present are updated.
  *   Reconnect   If disconnected, retry every 15 s (RECONNECT_INTERVAL). After 5 s the
  *               yellow LED starts blinking.
@@ -239,7 +239,6 @@
  *   motorRunTime      int     Run duration (ms)
  *   motorWaitTime     int     Wait before running (ms)
  *   delayAfterRun     int     Lock-out after a run (ms)
- *   useMotionSensor   bool    Motion sensor mode instead of MQTT detection
  *   motorDirection    int     0 = Forward, 1 = Reverse
  *   dutyCycle         int     Motor 1 PWM (0–255)
  *   dutyCycle2        int     Motor 2 PWM (0–255)
@@ -255,6 +254,11 @@
  *   synced once after WiFi connects. Debug mode adds more log lines and serial output
  *   (115200 baud) but reduces performance.
  *
+ *   Diagnostics that are always logged (even with debug off): boot reset reason and free
+ *   heap (a "CRASH" or "BROWNOUT" reason means the board restarted unexpectedly), the
+ *   first MQTT report after each connect (size and free heap), MQTT connection drops
+ *   (with the PubSubClient state code) and JSON parse failures.
+ *
  *
  * 13. Code map
  * ------------
@@ -266,12 +270,13 @@
  *                      handleLogs, handleFirmwareUpload, handleRoot
  *   MQTT               mqttCallback, connectToMqtt, publishPushAllMessage,
  *                      sendPushAllCommand
- *   Idle info screens  updateInfoScreen, drawProgressPage, drawJobPage, gcodeStateLabel
+ *   Idle info screens  updateInfoScreen, drawProgressPage, drawJobPage, drawIdlePage,
+ *                      drawIdleLines, formatAgo, setDisplayDim, gcodeStateLabel
  *   WiFi               connectToWiFi, startWiFiAPMode, resetToAPMode
  *   setup()            I2C scan, pin and PWM init, load settings, OLED, WiFi/AP, MQTT,
  *                      web routes
  *   loop()             Web/DNS → reset button → (stop here if AP mode) → manual button
- *                      → motion sensor → auto pushall → motor state machine and OLED
+ *                      → auto pushall → motor state machine and OLED
  *                      countdown → post-run screen → LED blinking → MQTT reconnect
  *
  *
@@ -320,6 +325,7 @@
 // Added a button for manual trigger
 // Added the feature to reset (enter AP mode) after pressing button for 3 sconds
 // Added OLED messages when using motion sensor
+// Removed motion sensor mode (MQTT detection only). GPIO 22 is no longer used.
 char version[10] = "1.6";
 
 #include <Arduino.h>
@@ -352,6 +358,7 @@ void drawDigitalNumber(int x, int y, int seconds);
 void drawProgressBar(int x, int y, int w, int h, float progress);
 void flashScreen();
 void startMotorUI(); // called when motor starts
+String heapInfo();   // diagnostics: free heap summary for the logs
 
 // ---------- 16x16 icons (monochrome bitmaps, 16x16 => 32 bytes each) ----------
 const unsigned char iconConveyor [] PROGMEM = {
@@ -508,8 +515,6 @@ const int greenLight = 19;
 const int yellowLight = 18;
 const int redLight = 4;
 
-const int motionSensorPin = 22;  // Adjust the pin as needed
-bool useMotionSensor = false;
 
 const int manualTriggerPin = 12;  // Manual trigger button pin
 const int resetButtonPin = 2;      // Reset button pin (enters AP mode when held for 3 seconds)
@@ -609,11 +614,20 @@ int printer_remaining_min = -1;   // print.mc_remaining_time in minutes (-1 = un
 int printer_layer = -1;           // print.layer_num
 int printer_total_layers = -1;    // print.total_layer_num
 String printer_job = "";          // print.subtask_name
+int printer_nozzle_temp = -1;     // print.nozzle_temper (rounded, -1 = unknown)
+int printer_bed_temp = -1;        // print.bed_temper (rounded, -1 = unknown)
+
+// Conveyor stats for the idle screens (reset on reboot)
+unsigned int conveyorRunCount = 0;
+unsigned long lastRunStartMillis = 0;
 
 // Idle info screens (progress / job), rotated on the OLED when nothing else is happening
 const unsigned long INFO_PAGE_INTERVAL = 4000;  // switch page every 4 s
+const unsigned long IDLE_DIM_AFTER = 120000;    // dim the OLED after 2 min of continuous idle (burn-in protection)
 const unsigned long INFO_HOLD_TIME = 5000;      // keep "MQTT Connected" / "DONE" visible this long
 unsigned long infoHoldStart = 0;
+bool mqttFirstMessageLogged = false;  // diagnostics: log the first report after each connect
+unsigned long infoIdleSince = 0;
 
 // Create instances
 WiFiClientSecure espClient;
@@ -802,19 +816,19 @@ void handleConfig() {
         html += "<select id='mqtt_password_select' onchange=\"document.getElementById('mqtt_password').value=this.value\">";
         html += "  <option value=''>-- Select code --</option>";
         html += "  <option value='2fcc0064'>2fcc0064</option>";
+        html += "  <option value='2a5c1918'>2a5c1918</option>";
         html += "</select><br>";
         html += "<input type='text' id='mqtt_password' name='mqtt_password' value='" + String(mqtt_password) + "'><br>";
         html += "<label for='serial_number'>Bambu Printer Serial Number:</label>";
         html += "<select id='serial_number_select' onchange=\"document.getElementById('serial_number').value=this.value\">";
         html += "  <option value=''>-- Select serial --</option>";
         html += "  <option value='00M09D563001230'>00M09D563001230</option>";
+        html += "  <option value='03919C442502683'>03919C442502683</option>";
         html += "</select><br>";
         html += "<input type='text' id='serial_number' name='serial_number' value='" + String(serial_number) + "'><br>";
         html += "<label for=\"motorRunTime\">Motor Run Time (ms):</label><input type=\"number\" id=\"motorRunTime\" name=\"motorRunTime\" value=\"" + String(motorRunTime) + "\"><br>";
         html += "<label for=\"motorWaitTime\">Motor Wait Time (ms):</label><input type=\"number\" id=\"motorWaitTime\" name=\"motorWaitTime\" value=\"" + String(motorWaitTime) + "\"><br>";
         html += "<label for=\"delayAfterRun\">Delay After Run (ms):</label><input type=\"number\" id=\"delayAfterRun\" name=\"delayAfterRun\" value=\"" + String(delayAfterRun) + "\"><br>";
-        html += "<label for=\"useMotionSensor\"> Use Motion Sensor (Disables MQTT detection):</label>";
-        html += "<input type=\"checkbox\" id=\"useMotionSensor\" name=\"useMotionSensor\" " + String(useMotionSensor ? "checked" : "") + "><br>";
         html += "<label for=\"printer_model\">Printer Model:</label>";
         html += "<select id=\"printer_model\" name=\"printer_model\">";
         html += "<option value=\"X1\"" + String((String(printer_model) == "X1") ? " selected" : "") + ">X1</option>";
@@ -862,7 +876,6 @@ void handleConfig() {
         motorRunTime = server.arg("motorRunTime").toInt();
         motorWaitTime = server.arg("motorWaitTime").toInt();
         delayAfterRun = server.arg("delayAfterRun").toInt();
-        useMotionSensor = server.hasArg("useMotionSensor");
         debug = server.hasArg("debug");
         motorDirection = server.arg("motorDirection").toInt();
         if (server.hasArg("pushIntervalSec")) {
@@ -882,7 +895,6 @@ void handleConfig() {
         preferences.putInt("motorRunTime", motorRunTime);
         preferences.putInt("motorWaitTime", motorWaitTime);
         preferences.putInt("delayAfterRun", delayAfterRun);
-        preferences.putBool("useMotionSensor", useMotionSensor);
         preferences.putString("printer_model", printer_model);
         preferences.putInt("motorDirection", motorDirection);
         preferences.putInt("dutyCycle", dutyCycle);
@@ -945,16 +957,18 @@ void handleLogs() {
 
 // MQTT callback function
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    if (!mqttFirstMessageLogged) {
+        mqttFirstMessageLogged = true;
+        addLogEntry("First MQTT report received: " + String(length) + " bytes | " + heapInfo());
+    }
     DynamicJsonDocument doc(40000);
     DeserializationError error = deserializeJson(doc, payload, length);
 
     if (error) {
-        if (debug) {
-            Serial.print(F("deserializeJson() failed: "));
-            Serial.println(error.c_str());
-            addLogEntry("deserializeJson() failed: ");
-            addLogEntry(error.c_str());
-        }
+        // Always log parse failures (e.g. NoMemory / IncompleteInput on large reports)
+        Serial.print(F("deserializeJson() failed: "));
+        Serial.println(error.c_str());
+        addLogEntry("deserializeJson() failed (" + String(length) + " bytes): " + String(error.c_str()) + " | " + heapInfo());
         return;
     }
 
@@ -975,9 +989,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         if (p.containsKey("layer_num")) printer_layer = p["layer_num"].as<int>();
         if (p.containsKey("total_layer_num")) printer_total_layers = p["total_layer_num"].as<int>();
         if (p.containsKey("subtask_name")) printer_job = p["subtask_name"].as<String>();
+        if (p.containsKey("nozzle_temper")) printer_nozzle_temp = (int)(p["nozzle_temper"].as<float>() + 0.5f);
+        if (p.containsKey("bed_temper")) printer_bed_temp = (int)(p["bed_temper"].as<float>() + 0.5f);
     }
 
-    if (!useMotionSensor && !motorWaiting && !motorRunning && !delayAfterRunning &&
+    if (!motorWaiting && !motorRunning && !delayAfterRunning &&
         (printer_stage == 4 || printer_stage == 14 || (printer_sub_stage == 4 && printer_stage != -1))) {
         manualMode = false;  // MQTT trigger is not manual button mode
         motorWaiting = true;
@@ -1002,7 +1018,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         oledShow("Printer", "Event detected", "Waiting...", iconWarn);
     }
 
-    if (debug && !useMotionSensor) {
+    if (debug) {
         Serial.println("Bambu Poop Conveyor v" + String(version) +
                " | Wifi: " + WiFi.localIP().toString() +
                " | Current Print Stage: " + String(getStageInfo(printer_stage)) +
@@ -1057,6 +1073,7 @@ void connectToMqtt() {
         if (client.connect("BambuConveyor", mqtt_user, mqtt_password)) {
             Serial.println("Connected to Bambu printer");
             addLogEntry("Connected to Bambu printer");
+            mqttFirstMessageLogged = false;
             sprintf(mqtt_topic, "device/%s/report", serial_number);
             client.subscribe(mqtt_topic);
             publishPushAllMessage();
@@ -1072,12 +1089,10 @@ void connectToMqtt() {
             oledShow("MQTT Connected", "to Bambu printer", "", iconCheck);
             infoHoldStart = millis();
         } else {
-            if (debug) {
-                Serial.print("Failed: ");
-                Serial.print(client.state());
-                Serial.println(" try again in 5 seconds");
-                addLogEntry("Failed to connect to MQTT (Bambu Printer), trying again in 5 seconds");
-            }
+            Serial.print("Failed: ");
+            Serial.print(client.state());
+            Serial.println(" try again in 15 seconds");
+            addLogEntry("Failed to connect to MQTT (Bambu Printer), state " + String(client.state()) + ", trying again in 15 seconds");
             lastAttemptTime = millis();
             digitalWrite(redLight, HIGH);
             addLogEntry("RED light turned on");
@@ -1110,6 +1125,25 @@ void sendPushAllCommand() {
     }
 }
 
+// Diagnostics: why the ESP32 last restarted
+const char* resetReasonText() {
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON: return "power on";
+        case ESP_RST_SW: return "software restart";
+        case ESP_RST_PANIC: return "CRASH (panic)";
+        case ESP_RST_INT_WDT: return "CRASH (interrupt watchdog)";
+        case ESP_RST_TASK_WDT: return "CRASH (task watchdog)";
+        case ESP_RST_WDT: return "CRASH (other watchdog)";
+        case ESP_RST_BROWNOUT: return "BROWNOUT (power dip)";
+        case ESP_RST_DEEPSLEEP: return "deep sleep";
+        default: return "other/unknown";
+    }
+}
+
+String heapInfo() {
+    return "free heap " + String(ESP.getFreeHeap()) + " | largest block " + String(ESP.getMaxAllocHeap());
+}
+
 void setup() {
     Serial.begin(115200);
     Serial.println("Scanning I2C...");
@@ -1136,7 +1170,6 @@ void setup() {
     pinMode(yellowLight, OUTPUT);
     pinMode(redLight, OUTPUT);
     pinMode(greenLight, OUTPUT);
-    pinMode(motionSensorPin, INPUT);
     pinMode(manualTriggerPin, INPUT_PULLUP);  // Button with internal pull-up resistor
     pinMode(resetButtonPin, INPUT_PULLUP);    // Reset button with internal pull-up resistor
 
@@ -1160,7 +1193,8 @@ void setup() {
     String storedMqttServer = preferences.getString("mqtt_server", "");
     String storedMqttPassword = preferences.getString("mqtt_password", "");
     String storedSerialNumber = preferences.getString("serial_number", "");
-    useMotionSensor = preferences.getBool("useMotionSensor", false);
+    // Motion sensor mode was removed. Drop the stale setting from devices that had it saved.
+    if (preferences.isKey("useMotionSensor")) preferences.remove("useMotionSensor");
     String storedPrinterModel = preferences.getString("printer_model", "X1");  // Default "X1" if missing
     debug = preferences.getBool("debug", debug);
 
@@ -1224,10 +1258,11 @@ void setup() {
         sendPushAllCommand();
     }
 
-    // Show initial status based on mode
-    if (useMotionSensor) {
-        oledShow("Using Motion", "Sensor Mode", "", iconCheck);
-    } else if (WiFi.status() == WL_CONNECTED && client.connected()) {
+    addLogEntry(String("Boot complete. Reset reason: ") + resetReasonText() + " | " + heapInfo());
+    Serial.println(String("Reset reason: ") + resetReasonText() + " | " + heapInfo());
+
+    // Show initial status
+    if (WiFi.status() == WL_CONNECTED && client.connected()) {
         oledShow("MQTT Connected", "to Bambu printer", "", iconCheck);
         infoHoldStart = millis();
     }
@@ -1350,6 +1385,8 @@ bool mqttReconnecting = false;
 
 void startMotorUI() {
     // Called when motor begins running. Save motorRunStartTime already set by motor control logic.
+    conveyorRunCount++;
+    lastRunStartMillis = millis();
     flashScreen();
     // initial render will happen in loop
 }
@@ -1412,15 +1449,91 @@ void drawJobPage() {
     display.display();
 }
 
-// Idle OLED: rotate progress and job pages. Only called when nothing else owns the screen.
+// Dim/undim the OLED (only sends the command when the state changes)
+void setDisplayDim(bool dim) {
+    static bool dimmed = false;
+    if (dim != dimmed) {
+        display.dim(dim);
+        dimmed = dim;
+    }
+}
+
+// Left-aligned text screen (up to 3 lines of 21 characters) for the idle pages
+void drawIdleLines(const String &l1, const String &l2 = "", const String &l3 = "") {
+    const String lines[3] = {l1, l2, l3};
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    for (int i = 0; i < 3; i++) {
+        if (lines[i].length() == 0) continue;
+        display.setCursor(0, i * 11);
+        display.print(lines[i].length() > 21 ? lines[i].substring(0, 21) : lines[i]);
+    }
+    display.display();
+}
+
+// "5s ago", "12m ago", "2h 05m ago"
+String formatAgo(unsigned long ms) {
+    unsigned long sec = ms / 1000;
+    char buf[24];
+    if (sec < 60) snprintf(buf, sizeof(buf), "%lus ago", sec);
+    else if (sec < 3600) snprintf(buf, sizeof(buf), "%lum ago", sec / 60);
+    else snprintf(buf, sizeof(buf), "%luh %02lum ago", sec / 3600, (sec % 3600) / 60);
+    return String(buf);
+}
+
+// Number of idle pages: 0 state, 1 MQTT/printer, 2 WiFi, 3 conveyor, 4 clock (only if time is synced)
+const int IDLE_PAGE_COUNT = 5;
+
+bool drawIdlePage(int page) {
+    switch (page) {
+        case 0: {
+            String temps = "";
+            if (printer_nozzle_temp >= 0 && printer_bed_temp >= 0) {
+                temps = "Nozzle " + String(printer_nozzle_temp) + "C Bed " + String(printer_bed_temp) + "C";
+            }
+            drawIdleLines(String("Printer: ") + gcodeStateLabel(), temps);
+            return true;
+        }
+        case 1:
+            drawIdleLines("MQTT connected", String("Bambu ") + printer_model, String(mqtt_server));
+            return true;
+        case 2:
+            drawIdleLines(String("WiFi: ") + ssid, WiFi.localIP().toString(), String("Signal ") + WiFi.RSSI() + " dBm");
+            return true;
+        case 3:
+            drawIdleLines(String("Conveyor v") + version,
+                          String("Runs since boot: ") + conveyorRunCount,
+                          conveyorRunCount ? String("Last run ") + formatAgo(millis() - lastRunStartMillis) : String("No runs yet"));
+            return true;
+        case 4: {
+            time_t now = time(nullptr);
+            if (now < 1700000000) return false;  // clock not synced yet, skip this page
+            struct tm t;
+            localtime_r(&now, &t);
+            char d[24], h[16];
+            strftime(d, sizeof(d), "%a %b %d %Y", &t);
+            strftime(h, sizeof(h), "%I:%M %p", &t);
+            drawIdleLines(String(d), String(h));
+            return true;
+        }
+    }
+    return false;
+}
+
+// Idle OLED (MQTT mode). While a job is running: progress and job pages.
+// Otherwise: rotate printer/connection/network/conveyor/clock pages, then dim to protect the OLED.
 void updateInfoScreen() {
     static unsigned long lastPageSwitch = 0;
     static unsigned long lastDraw = 0;
     static int page = 0;
+    static int idlePage = 0;
     unsigned long now = millis();
 
     if (gcodeState.length() == 0 && printer_percent < 0 && printer_job.length() == 0) {
         // Connected, but no report received yet
+        setDisplayDim(false);
+        infoIdleSince = 0;
         if (now - lastDraw >= 1000) {
             lastDraw = now;
             oledShow("Printer", "Waiting for data", "", nullptr);
@@ -1428,19 +1541,43 @@ void updateInfoScreen() {
         return;
     }
 
-    // Job page is only useful while there is a job
-    bool hasJob = printer_job.length() > 0 && (gcodeState == "RUNNING" || gcodeState == "PAUSE" || gcodeState == "PREPARE");
-    if (!hasJob) page = 0;
-    else if (now - lastPageSwitch >= INFO_PAGE_INTERVAL) {
-        page = (page + 1) % 2;
-        lastPageSwitch = now;
-        lastDraw = 0;  // redraw immediately
+    bool printing = (gcodeState == "RUNNING" || gcodeState == "PAUSE" || gcodeState == "PREPARE");
+
+    if (printing) {
+        infoIdleSince = 0;
+        setDisplayDim(false);
+
+        // Job page is only useful while there is a job name
+        bool hasJob = printer_job.length() > 0;
+        if (!hasJob) page = 0;
+        else if (now - lastPageSwitch >= INFO_PAGE_INTERVAL) {
+            page = (page + 1) % 2;
+            lastPageSwitch = now;
+            lastDraw = 0;  // redraw immediately
+        }
+
+        if (now - lastDraw >= 1000 || lastDraw == 0) {
+            lastDraw = now;
+            if (page == 0) drawProgressPage();
+            else drawJobPage();
+        }
+        return;
     }
 
-    if (now - lastDraw >= 1000 || lastDraw == 0) {
+    // Idle (IDLE / FINISH / FAILED / unknown): rotate info pages and dim after a while
+    if (infoIdleSince == 0) infoIdleSince = now;
+    setDisplayDim(now - infoIdleSince >= IDLE_DIM_AFTER);
+
+    if (now - lastPageSwitch >= INFO_PAGE_INTERVAL || lastDraw == 0) {
+        lastPageSwitch = now;
+        for (int i = 0; i < IDLE_PAGE_COUNT; i++) {
+            idlePage = (idlePage + 1) % IDLE_PAGE_COUNT;
+            if (drawIdlePage(idlePage)) break;
+        }
         lastDraw = now;
-        if (page == 0) drawProgressPage();
-        else drawJobPage();
+    } else if (now - lastDraw >= 1000) {
+        lastDraw = now;
+        drawIdlePage(idlePage);  // refresh live values (signal, time, "last run")
     }
 }
 
@@ -1558,19 +1695,8 @@ void loop() {
 
     lastButtonState = reading;  // Save current state for next iteration
 
-    if (useMotionSensor && digitalRead(motionSensorPin) == HIGH && !motorWaiting && !motorRunning && !delayAfterRunning) {
-        manualMode = false;  // Motion sensor trigger is not manual button mode
-        motorWaitStartTime = millis();
-        yellowLightStartTime = millis();
-        yellowLightState = HIGH;
-        digitalWrite(yellowLight, yellowLightState);
-        addLogEntry("Motion detected, starting conveyor");
-        motorWaiting = true;
-        oledShow("Motion sensor", "event detected", "Waiting...", iconWarn);
-    }
-
     // Auto PushAll based on printer model interval
-    if (!useMotionSensor && autoPushAllEnabled && client.connected() && (currentMillis - previousMillis >= pushInterval)) {
+    if (autoPushAllEnabled && client.connected() && (currentMillis - previousMillis >= pushInterval)) {
         previousMillis = currentMillis;
         if (debug) {
             Serial.println("Requesting pushAll...");
@@ -1694,11 +1820,7 @@ void loop() {
     if (showPostRunStatus) {
         // wait 2 seconds after "run complete" is shown
         if (millis() - postRunShownAt > 2000) {
-            // Show appropriate status based on mode
-            if (useMotionSensor) {
-                oledShow("Using Motion", "Sensor Mode", "", iconCheck);
-            }
-            // In MQTT mode updateInfoScreen() takes over from here.
+            // updateInfoScreen() takes over from here.
 
             // only show this one time
             showPostRunStatus = false;
@@ -1707,20 +1829,13 @@ void loop() {
         // The idle-status block below is already gated on !showPostRunStatus.
     }
 
-    // Show idle status when using motion sensor and system is idle
-    static unsigned long lastIdleStatusUpdate = 0;
-    if (useMotionSensor && !motorWaiting && !motorRunning && !delayAfterRunning && !showPostRunStatus) {
-        // Update idle status every 5 seconds to ensure it stays visible
-        if (currentMillis - lastIdleStatusUpdate > 5000) {
-            oledShow("Using Motion", "Sensor Mode", "", iconCheck);
-            lastIdleStatusUpdate = currentMillis;
-        }
-    }
-
-    // Idle info screens (MQTT mode): progress/job rotation once the connect/DONE message has been seen
-    if (!useMotionSensor && client.connected() && !motorWaiting && !motorRunning && !showPostRunStatus &&
+    // Idle info screens: progress/job rotation once the connect/DONE message has been seen
+    if (client.connected() && !motorWaiting && !motorRunning && !showPostRunStatus &&
         !resetButtonPressed && (millis() - infoHoldStart >= INFO_HOLD_TIME)) {
         updateInfoScreen();
+    } else {
+        infoIdleSince = 0;
+        setDisplayDim(false);  // events, motor, reset hold and messages always at full brightness
     }
 
     // Handle yellow light flashing based on MQTT/WiFi status
@@ -1733,7 +1848,18 @@ void loop() {
         }
     }
 
-    if (!useMotionSensor && !client.connected()) {
+    // Diagnostics: record why/when the MQTT connection drops (PubSubClient state: -4 timeout,
+    // -3 connection lost, -2 connect failed, -1 disconnected, 1-5 refused by broker)
+    static bool wasMqttConnected = false;
+    bool mqttNowConnected = client.connected();
+    if (wasMqttConnected && !mqttNowConnected) {
+        addLogEntry("MQTT connection lost. PubSubClient state: " + String(client.state()) + " | " + heapInfo());
+        Serial.println("MQTT connection lost. State: " + String(client.state()));
+    }
+    wasMqttConnected = mqttNowConnected;
+    if (mqttNowConnected) disconnectedTime = 0;  // so the 5 s yellow-blink delay works on every drop
+
+    if (!client.connected()) {
         if (disconnectedTime == 0) {
             disconnectedTime = millis();  // Mark the time of disconnection
         }
